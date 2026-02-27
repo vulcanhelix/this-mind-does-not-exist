@@ -1,0 +1,127 @@
+# ============================================================
+# This Mind Does Not Exist — Docker Compose
+# ============================================================
+# Usage:
+#   docker compose up              → Start everything
+#   docker compose up -d           → Start in background
+#   docker compose down            → Stop everything
+#   docker compose logs -f web     → Follow web logs
+# ============================================================
+
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────
+  # Ollama — Local LLM inference server
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tmde-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Model Loader — Pulls required models on first run
+  # ─────────────────────────────────────────────
+  model-loader:
+    image: ollama/ollama:latest
+    container_name: tmde-model-loader
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: >
+      sh -c "
+        echo '🧠 Pulling models for This Mind Does Not Exist...'
+        ollama pull qwen3:32b
+        ollama pull llama3.3:70b
+        ollama pull nomic-embed-text
+        echo '✅ All models ready!'
+      "
+    restart: "no"
+
+  # ─────────────────────────────────────────────
+  # ChromaDB — Vector database for RAG
+  # ─────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: tmde-chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Backend API — Fastify server (debate engine + RAG)
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: packages/core/Dockerfile
+    container_name: tmde-api
+    ports:
+      - "${API_PORT:-3001}:3001"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - VECTOR_DB=chromadb
+      - CHROMADB_URL=http://chromadb:8000
+      - DATABASE_PATH=/app/data/traces.db
+      - TRACES_DIR=/app/data/traces
+      - TEMPLATES_DIR=/app/data
+      - NODE_ENV=production
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─────────────────────────────────────────────
+  # Web UI — Next.js frontend
+  # ─────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: tmde-web
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:3001
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+    driver: local
+  chroma_data:
+    driver: local

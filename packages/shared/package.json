@@ -1,0 +1,7 @@
+{
+  "name": "@tmde/shared",
+  "version": "0.1.0",
+  "description": "Shared types, schemas, and utilities for This Mind Does Not Exist",
+  "main": "types/index.ts",
+  "types": "types/index.ts"
+}

@@ -1,0 +1,27 @@
+{
+  "name": "this-mind-does-not-exist",
+  "version": "0.1.0",
+  "description": "Frontier reasoning that doesn't exist… until you run it locally.",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "npm run dev --workspace=@tmde/core",
+    "dev:web": "npm run dev --workspace=@tmde/web",
+    "dev:cli": "npm run dev --workspace=@tmde/cli",
+    "build": "npm run build --workspace=@tmde/core && npm run build --workspace=@tmde/web",
+    "setup": "./scripts/setup.sh",
+    "models": "./scripts/install-ollama-models.sh",
+    "finetune": "./scripts/nightly-finetune.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
