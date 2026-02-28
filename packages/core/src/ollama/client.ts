@@ -50,8 +50,26 @@ export class OllamaClient {
   private timeout: number;
 
   constructor(baseUrl: string = 'http://localhost:11434', timeout: number = 120000) {
-    this.baseUrl = baseUrl;
+    this.baseUrl = baseUrl.replace(/\/$/, '');
     this.timeout = timeout;
+  }
+
+  /**
+   * Retry a function with exponential backoff.
+   */
+  private async withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+    let lastError: Error | unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastError = err;
+        if (i < attempts - 1) {
+          await new Promise(res => setTimeout(res, 1000 * Math.pow(2, i)));
+        }
+      }
+    }
+    throw lastError;
   }
 
   /**
@@ -59,11 +77,63 @@ export class OllamaClient {
    * Yields tokens as they are generated.
    */
   async *generate(options: OllamaGenerateOptions): AsyncGenerator<string> {
-    // TODO: POST to /api/generate with stream: true
-    // TODO: Parse NDJSON response stream
-    // TODO: Yield each token's response field
-    // TODO: Handle errors and timeouts
-    yield ''; // Placeholder
+    const body: Record<string, any> = {
+      model: options.model,
+      prompt: options.prompt,
+      stream: true,
+      options: {
+        temperature: options.temperature ?? 0.7,
+        ...(options.options ?? {}),
+      },
+    };
+    if (options.system) body.system = options.system;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    let response: Response;
+    try {
+      response = await this.withRetry(() =>
+        fetch(`${this.baseUrl}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Ollama generate failed: ${response.status} ${response.statusText}`);
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.response) yield parsed.response;
+            if (parsed.done) return;
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   /**
@@ -71,27 +141,105 @@ export class OllamaClient {
    * Yields tokens as they are generated.
    */
   async *chat(options: OllamaChatOptions): AsyncGenerator<string> {
-    // TODO: POST to /api/chat with stream: true
-    // TODO: Parse NDJSON response stream
-    // TODO: Yield each message content delta
-    yield ''; // Placeholder
+    const body: Record<string, any> = {
+      model: options.model,
+      messages: options.messages,
+      stream: true,
+      options: {
+        temperature: options.temperature ?? 0.7,
+        ...(options.options ?? {}),
+      },
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    let response: Response;
+    try {
+      response = await this.withRetry(() =>
+        fetch(`${this.baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Ollama chat failed: ${response.status} ${response.statusText}`);
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.message?.content) yield parsed.message.content;
+            if (parsed.done) return;
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   /**
    * Generate embeddings for text.
    */
   async embed(options: OllamaEmbedOptions): Promise<number[][]> {
-    // TODO: POST to /api/embed
-    // TODO: Return embedding vectors
-    return []; // Placeholder
+    const response = await this.withRetry(() =>
+      fetch(`${this.baseUrl}/api/embed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: options.model, input: options.input }),
+      })
+    );
+
+    if (!response.ok) {
+      throw new Error(`Ollama embed failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json() as { embeddings: number[][] };
+    return data.embeddings;
   }
 
   /**
    * List all available models.
    */
   async listModels(): Promise<{ name: string; size: number; modifiedAt: string }[]> {
-    // TODO: GET /api/tags
-    return []; // Placeholder
+    const response = await this.withRetry(() =>
+      fetch(`${this.baseUrl}/api/tags`)
+    );
+
+    if (!response.ok) {
+      throw new Error(`Ollama listModels failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json() as {
+      models: { name: string; size: number; modified_at: string }[]
+    };
+
+    return (data.models ?? []).map(m => ({
+      name: m.name,
+      size: m.size,
+      modifiedAt: m.modified_at,
+    }));
   }
 
   /**
@@ -110,7 +258,39 @@ export class OllamaClient {
    * Pull a model if not already available.
    */
   async pullModel(modelName: string): Promise<void> {
-    // TODO: POST to /api/pull
-    // TODO: Stream progress updates
+    const response = await fetch(`${this.baseUrl}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: modelName, stream: true }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama pull failed: ${response.status} ${response.statusText}`);
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.status === 'success') return;
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 }
